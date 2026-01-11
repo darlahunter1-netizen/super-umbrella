@@ -42,6 +42,11 @@ def health():
     return jsonify({"status": "ok", "message": "Bot is running! 🚀"}), 200
 
 # ==================== БАЗА ДАННЫХ ====================
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Получено сообщение от {update.effective_user.id}: {update.message.text}")
+    await update.message.reply_text("Я тебя услышал! Сообщение дошло.")
+
+application.add_handler(MessageHandler(filters.TEXT, echo))
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -225,3 +230,4 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     logger.info(f"Flask запускается на порту {port}")
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
+
