@@ -23,15 +23,16 @@ DB_FILE = "users.db"
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = Flask(__name__)
+flask_app = Flask(__name__)
 
-@app.route("/")
+@flask_app.route("/")
 def health():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok", "message": "Bot is running! 🚀"}), 200
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("""CREATE TABLE IF NOT EXISTS users (
+    c = conn.cursor()
+    c.execute("""CREATE TABLE IF NOT EXISTS users (
                  user_id INTEGER PRIMARY KEY,
                  username TEXT,
                  full_name TEXT,
@@ -40,139 +41,153 @@ def init_db():
     conn.commit()
     conn.close()
 
-def add_user(user_id, username, full_name):
+def add_user(user_id: int, username: str | None, full_name: str):
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?)",
-                 (user_id, username, full_name, datetime.now()))
+    c = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO users (user_id, username, full_name, joined_at) VALUES (?, ?, ?, ?)",
+              (user_id, username, full_name, datetime.now()))
     conn.commit()
     conn.close()
 
 def get_users_count():
     conn = sqlite3.connect(DB_FILE)
-    count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    count = c.fetchone()[0]
     conn.close()
     return count
 
 def get_all_user_ids():
     conn = sqlite3.connect(DB_FILE)
-    ids = [row[0] for row in conn.execute("SELECT user_id FROM users")]
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    ids = [row[0] for row in c.fetchall()]
     conn.close()
     return ids
 
-pending = {}
+pending_requests = {}
 
-def make_captcha():
+def generate_captcha():
     a = random.randint(1, 10)
     b = random.randint(1, 10)
     return a + b, f"{a} + {b} = ?"
 
-async def join_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    req = update.chat_join_request
-    if not req or req.chat.id != GROUP_CHAT_ID:
+async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    request = update.chat_join_request
+    user = request.from_user
+    chat = request.chat
+
+    if chat.id != GROUP_CHAT_ID:
         return
 
-    user = req.from_user
-    ans, q = make_captcha()
-    opts = [ans, ans + random.randint(1, 5), ans - random.randint(1, 5)]
-    random.shuffle(opts)
+    answer, question = generate_captcha()
+    options = [answer, answer + random.randint(1, 5), answer - random.randint(1, 5)]
+    random.shuffle(options)
 
-    kb = [[InlineKeyboardButton(str(x), callback_data=f"cap_{x}_{user.id}")] for x in opts]
+    keyboard = [[InlineKeyboardButton(str(opt), callback_data=f"captcha_{opt}_{user.id}")] for opt in options]
 
-    pending[user.id] = {"answer": ans, "expires": datetime.now() + timedelta(minutes=5), "chat_id": req.chat.id}
-
-    await context.bot.send_message(
-        user.id,
-        f"Решите, чтобы вступить:\n\n<b>{q}</b>\n\n5 минут!",
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="HTML"
-    )
-
-async def cap_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+    expires = datetime.now() + timedelta(minutes=5)
+    pending_requests[user.id] = {"expires": expires, "answer": answer, "chat_id": chat.id}
 
     try:
-        _, val_str, uid_str = q.data.split("_")
-        val = int(val_str)
-        uid = int(uid_str)
-    except:
-        await q.edit_message_text("Ошибка кнопки")
-        return
-
-    if uid != q.from_user.id or uid not in pending:
-        await q.edit_message_text("Не твоя капча")
-        return
-
-    data = pending[uid]
-
-    if datetime.now() > data["expires"]:
-        await q.edit_message_text("Время вышло")
-        del pending[uid]
-        return
-
-    if val == data["answer"]:
-        add_user(uid, q.from_user.username, q.from_user.full_name)
-
-        text = (
-            "🎉 <b>Пройдено!</b>\n\n"
-            "Заявка в обработке. Мы проверим и добавим вас в группу скоро 🚀\n"
-            "Спасибо за терпение!"
+        await context.bot.send_message(
+            chat_id=user.id,
+            text=f"Чтобы вступить в <b>{chat.title}</b>, решите задачу:\n\n<b>{question}</b>\n\nУ вас 5 минут.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="HTML",
         )
-        photo = "https://i.imgur.com/0Z8Z8Z8.jpeg"  # ← можно поменять
+    except Exception as e:
+        logger.error(f"Ошибка отправки капчи {user.id}: {e}")
 
-        await context.bot.send_photo(uid, photo, caption=text, parse_mode="HTML")
-        await q.edit_message_text("✅ Готово!")
+async def captcha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data.split("_")
+    if len(data) != 3 or data[0] != "captcha":
+        return
+
+    chosen = int(data[1])
+    user_id = int(data[2])
+
+    if user_id != query.from_user.id or user_id not in pending_requests:
+        await query.edit_message_text("Ошибка или время истекло.")
+        return
+
+    info = pending_requests[user_id]
+
+    if datetime.now() > info["expires"]:
+        await query.edit_message_text("⏰ Время истекло.")
+        del pending_requests[user_id]
+        return
+
+    if chosen == info["answer"]:
+        add_user(user_id, query.from_user.username, query.from_user.full_name)
+
+        welcome_text = (
+            "🎉 <b>Поздравляем!</b> 🎉\n\n"
+            "Ваша заявка успешно прошла проверку и <b>находится в обработке</b>!\n\n"
+            "Мы проверим её в ближайшее время и добавим вас в эксклюзивное сообщество ShortsBlast 🚀\n"
+            "Пока ждёшь — держи мотивацию!"
+        )
+
+        photo_url = "https://i.imgur.com/0Z8Z8Z8.jpeg"
+
+        await context.bot.send_photo(
+            chat_id=user_id,
+            photo=photo_url,
+            caption=welcome_text,
+            parse_mode="HTML"
+        )
+
+        await query.edit_message_text("✅ Капча пройдена! Ожидай добавления.")
     else:
-        await q.edit_message_text("❌ Неверно.")
+        await query.edit_message_text("❌ Неправильно.")
 
-    del pending[uid]
+    del pending_requests[user_id]
 
-async def start(update: Update, _):
-    u = update.effective_user
-    add_user(u.id, u.username, u.full_name)
-    await update.message.reply_text("Привет! Подай заявку в группу — пришлю капчу.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    add_user(user.id, user.username, user.full_name)
+    await update.message.reply_text("Привет! Теперь я могу писать тебе персональные сообщения.")
 
-async def stats(update: Update, _):
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-    await update.message.reply_text(f"Пользователей: {get_users_count()}")
+    await update.message.reply_text(f"Собрано пользователей: {get_users_count()}")
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-
     if not context.args:
-        await update.message.reply_text("Напиши: /broadcast текст")
+        await update.message.reply_text("Использование: /broadcast Текст рассылки")
         return
-
     text = " ".join(context.args)
-    users = get_all_user_ids()
-    ok = fail = 0
-
-    await update.message.reply_text(f"Рассылаю {len(users)} людям...")
-
-    for uid in users:
+    user_ids = get_all_user_ids()
+    success = failed = 0
+    await update.message.reply_text(f"Рассылка {len(user_ids)} пользователям...")
+    for uid in user_ids:
         try:
-            await context.bot.send_message(uid, text)
-            ok += 1
-        except:
-            fail += 1
-        await asyncio.sleep(0.05)
+            await context.bot.send_message(chat_id=uid, text=text)
+            success += 1
+        except Exception as e:
+            logger.warning(f"Не удалось отправить {uid}: {e}")
+            failed += 1
+        await asyncio.sleep(0.05) # Анти-флуд
+    await update.message.reply_text(f"Рассылка завершена!\nУспешно: {success}\nНе удалось: {failed}")
 
-    await update.message.reply_text(f"Готово\nУспех: {ok}\nОшибок: {fail}")
-
-# Приложение
 application = Application.builder().token(TOKEN).build()
 
-application.add_handler(ChatJoinRequestHandler(join_handler))
-application.add_handler(CallbackQueryHandler(cap_handler, pattern="^cap_"))
+application.add_handler(ChatJoinRequestHandler(handle_join_request))
+application.add_handler(CallbackQueryHandler(captcha_callback, pattern="^captcha_"))
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("broadcast", broadcast))
 
 init_db()
 
-def polling():
+def run_polling():
+    logger.info("Telegram polling запускается в фоновом потоке")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
@@ -180,13 +195,14 @@ def polling():
         loop.run_until_complete(application.start())
         loop.run_forever()
     except Exception as e:
-        logger.error(e)
+        logger.error(f"Polling ошибка: {e}")
     finally:
         loop.run_until_complete(application.stop())
         loop.run_until_complete(application.shutdown())
         loop.close()
 
 if __name__ == "__main__":
-    Thread(target=polling, daemon=True).start()
+    Thread(target=run_polling, daemon=True).start()
     port = int(os.getenv("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    logger.info(f"Flask запускается на порту {port}")
+    flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
