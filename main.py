@@ -29,10 +29,7 @@ ADMIN_ID = 998091317
 
 DB_FILE = "users.db"
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 flask_app = Flask(__name__)
@@ -42,11 +39,6 @@ def health():
     return jsonify({"status": "ok", "message": "Bot is running! 🚀"}), 200
 
 # ==================== БАЗА ДАННЫХ ====================
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Получено сообщение от {update.effective_user.id}: {update.message.text}")
-    await update.message.reply_text("Я тебя услышал! Сообщение дошло.")
-
-application.add_handler(MessageHandler(filters.TEXT, echo))
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -190,7 +182,12 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await asyncio.sleep(0.05)
     await update.message.reply_text(f"Рассылка завершена!\nУспешно: {success}\nНе удалось: {failed}")
 
-# ==================== ПРИЛОЖЕНИЕ ====================
+# ==================== ВРЕМЕННЫЙ ECHO ДЛЯ ОТЛАДКИ ====================
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"Получено сообщение от {update.effective_user.id}: {update.message.text}")
+    await update.message.reply_text("Сообщение дошло! Текст: " + update.message.text)
+
+# ==================== СОЗДАНИЕ ПРИЛОЖЕНИЯ И РЕГИСТРАЦИЯ ХЕНДЛЕРОВ ====================
 application = Application.builder().token(TOKEN).build()
 
 application.add_handler(ChatJoinRequestHandler(handle_join_request))
@@ -198,13 +195,7 @@ application.add_handler(CallbackQueryHandler(captcha_callback, pattern="^captcha
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CommandHandler("stats", stats))
 application.add_handler(CommandHandler("broadcast", broadcast))
-
-# Временный echo для отладки — удалить потом, если не нужен
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    logger.info(f"Получено сообщение от {update.effective_user.id}: {update.message.text}")
-    await update.message.reply_text("Я тебя услышал! Сообщение дошло.")
-
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))  # echo для любого текста
 
 init_db()
 
@@ -230,4 +221,3 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     logger.info(f"Flask запускается на порту {port}")
     flask_app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
-
